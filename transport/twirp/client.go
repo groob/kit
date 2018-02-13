@@ -2,37 +2,45 @@ package twirp
 
 import (
 	"context"
-	"fmt"
-	"github.com/go-kit/kit/endpoint"
-	"github.com/twitchtv/twirp"
 	"net/http"
+	"net/url"
 	"reflect"
+
+	"github.com/go-kit/kit/endpoint"
+	"github.com/golang/protobuf/proto"
+	"github.com/twitchtv/twirp"
 )
 
 // Client wraps a Twirp client and provides a method that implements endpoint.Endpoint.
 type Client struct {
-	client    interface{}
-	method    string
-	enc       EncodeRequestFunc
-	dec       DecodeResponseFunc
-	before    []ClientRequestFunc
-	after     []ClientResponseFunc
-	finalizer ClientFinalizerFunc
+	client     *http.Client
+	tgt        *url.URL
+	protoReply reflect.Type
+	enc        EncodeRequestFunc
+	dec        DecodeResponseFunc
+	before     []ClientRequestFunc
+	after      []ClientResponseFunc
+	finalizer  ClientFinalizerFunc
 }
 
 // NewClient constructs a usable Client for a single remote method.
 func NewClient(
-	client interface{},
-	method string,
+	tgt *url.URL,
+	protoReply interface{},
 	enc EncodeRequestFunc,
 	dec DecodeResponseFunc,
 	options ...ClientOption,
 ) *Client {
 	c := &Client{
-		client: client,
-		method: method,
+		client: http.DefaultClient,
+		tgt:    tgt,
 		enc:    enc,
 		dec:    dec,
+		protoReply: reflect.TypeOf(
+			reflect.Indirect(
+				reflect.ValueOf(protoReply),
+			).Interface(),
+		),
 		before: []ClientRequestFunc{},
 		after:  []ClientResponseFunc{},
 	}
@@ -101,21 +109,8 @@ func (c Client) Endpoint() endpoint.Endpoint {
 			return nil, err
 		}
 
-		client := reflect.ValueOf(&c.client)
-		method := client.MethodByName(c.method)
-		if !method.IsValid() {
-			interfaceName := reflect.TypeOf(&c.client).Elem().Name()
-			return nil, fmt.Errorf("Invalid method specified: %s does not have method %s", interfaceName, c.method)
-		}
-
-		args := make([]reflect.Value, 2)
-		args[0] = reflect.ValueOf(ctx)
-		args[1] = reflect.ValueOf(req)
-
-		retVals := make([]reflect.Value, 2)
-		retVals = method.Call(args)
-		resp := retVals[0].Interface()
-		err = retVals[1].Interface().(error)
+		protoReply := reflect.New(c.protoReply).Interface()
+		err = doProtobufRequest(ctx, c.client, c.tgt.String(), req.(proto.Message), protoReply.(proto.Message))
 		if err != nil {
 			return nil, err
 		}
@@ -126,7 +121,7 @@ func (c Client) Endpoint() endpoint.Endpoint {
 		}
 
 		// Decode
-		response, err := c.dec(ctx, resp)
+		response, err := c.dec(ctx, protoReply)
 		if err != nil {
 			return nil, err
 		}
